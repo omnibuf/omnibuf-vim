@@ -1,0 +1,94 @@
+*omnibuf.txt*  View OmniBuf (.obuf) binary files as JSON and hex in Vim
+
+==============================================================================
+CONTENTS                                                    *omnibuf-contents*
+
+  1. Introduction ............................ |omnibuf-intro|
+  2. Commands ................................ |omnibuf-commands|
+  3. Configuration ........................... |omnibuf-config|
+
+==============================================================================
+1. INTRODUCTION                                                *omnibuf-intro*
+
+omnibuf.vim intercepts `*.obuf` files when opened in Vim or Neovim, decodes
+them with the `omnibuf` CLI, and displays editable, pretty-printed JSON by
+default. Saving (`:w`) pipes the JSON buffer through `omnibuf encode` and
+atomically writes the updated binary `.obuf` file. Invalid JSON aborts the
+save without touching the existing file on disk.
+
+You can switch to a read-only hex dump or open a side-by-side split showing
+both JSON and binary hex at any time. Companion hex splits refresh
+automatically when you save the JSON buffer.
+
+==============================================================================
+2. COMMANDS                                                 *omnibuf-commands*
+
+                                                                 *:OmnibufJson*
+:OmnibufJson            Show the decoded JSON representation in the current
+                        buffer.
+
+                                                                  *:OmnibufHex*
+:OmnibufHex             Show the canonical hex dump of the raw `.obuf` file in
+                        the current buffer (`xxd`, `hexdump -C`, or `od`).
+
+                                                               *:OmnibufToggle*
+:OmnibufToggle          Toggle the current buffer between JSON and hex views.
+
+                                                                *:OmnibufSplit*
+:OmnibufSplit           Open or close a companion split window displaying the
+                        opposite view (hex alongside JSON, or JSON alongside
+                        hex).
+
+                                                              *:OmnibufRefresh*
+:OmnibufRefresh         Re-read the `.obuf` file from disk and refresh the
+                        current view.
+
+                                                               *:OmnibufSchema*
+:OmnibufSchema [schema] [type]
+                        Set a buffer-local FileDescriptorSet (`-s`) and
+                        optional message type (`-t`), then refresh. Call with
+                        no arguments to clear buffer-local schema settings.
+
+==============================================================================
+3. CONFIGURATION                                              *omnibuf-config*
+
+                                                               *g:omnibuf_cli*
+g:omnibuf_cli           Path or name of the `omnibuf` CLI binary.
+                        Default: `'omnibuf'`
+
+                                                      *g:omnibuf_default_view*
+g:omnibuf_default_view  Default view when opening `*.obuf` files:
+                        `'json'` (default), `'hex'`, or `'split'`.
+
+                                                            *g:omnibuf_schema*
+g:omnibuf_schema        Optional default FileDescriptorSet path passed to
+                        `omnibuf decode -s`.
+                        Default: `''`
+
+                                                              *g:omnibuf_type*
+g:omnibuf_type          Optional default message type name passed to
+                        `omnibuf decode -t` / `omnibuf encode -t`.
+                        Default: `''`
+
+                                                            *g:omnibuf_field0*
+g:omnibuf_field0        When `1` (default), include Field #0 inline field
+                        names in schema-less encode mode. Set to `0` to pass
+                        `--no-field0`.
+                        Default: `1`
+
+                                                     *g:omnibuf_deterministic*
+g:omnibuf_deterministic When `1`, pass `--deterministic` to `omnibuf encode`.
+                        Default: `0`
+
+                                                           *g:omnibuf_hex_cmd*
+g:omnibuf_hex_cmd       Custom command used to render hex dumps (the file path
+                        is appended). Auto-detects `xxd`, `hexdump -C`, and
+                        `od` when empty.
+                        Default: `''`
+
+                                                         *g:omnibuf_split_cmd*
+g:omnibuf_split_cmd     Vim command used to create the companion split window
+                        in `:OmnibufSplit`.
+                        Default: `'botright vnew'`
+
+vim:tw=78:ts=8:ft=help:norl:
