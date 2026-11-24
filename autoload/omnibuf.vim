@@ -79,16 +79,22 @@ endfunction
 function! s:build_hex_cmd(filepath) abort
   let l:custom = get(g:, 'omnibuf_hex_cmd', '')
   if !empty(l:custom)
-    return {'ok': 1, 'cmd': l:custom . ' ' . shellescape(a:filepath)}
+    return {'ok': 1, 'cmd': l:custom . ' ' . shellescape(a:filepath), 'capped': 0, 'limit': 0, 'size': 0}
   endif
+  let l:limit = str2nr(string(get(g:, 'omnibuf_max_hex_bytes', 262144)))
+  let l:size = getfsize(a:filepath)
+  let l:capped = l:limit > 0 && l:size > l:limit
   if executable('xxd')
-    return {'ok': 1, 'cmd': 'xxd ' . shellescape(a:filepath)}
+    let l:flag = l:limit > 0 ? ' -l ' . l:limit : ''
+    return {'ok': 1, 'cmd': 'xxd' . l:flag . ' ' . shellescape(a:filepath), 'capped': l:capped, 'limit': l:limit, 'size': l:size}
   endif
   if executable('hexdump')
-    return {'ok': 1, 'cmd': 'hexdump -C ' . shellescape(a:filepath)}
+    let l:flag = l:limit > 0 ? ' -n ' . l:limit : ''
+    return {'ok': 1, 'cmd': 'hexdump -C' . l:flag . ' ' . shellescape(a:filepath), 'capped': l:capped, 'limit': l:limit, 'size': l:size}
   endif
   if executable('od')
-    return {'ok': 1, 'cmd': 'od -Ax -tx1z -v ' . shellescape(a:filepath)}
+    let l:flag = l:limit > 0 ? ' -N ' . l:limit : ''
+    return {'ok': 1, 'cmd': 'od -Ax -tx1z -v' . l:flag . ' ' . shellescape(a:filepath), 'capped': l:capped, 'limit': l:limit, 'size': l:size}
   endif
   return {'ok': 0, 'error': 'No hex viewer found (install xxd, hexdump, or od, or set g:omnibuf_hex_cmd)'}
 endfunction
@@ -131,6 +137,9 @@ function! s:run_hex(filepath) abort
   if empty(l:lines)
     return {'ok': 1, 'lines': ['(empty file: 0 bytes)']}
   endif
+  if get(l:spec, 'capped', 0)
+    call add(l:lines, '... truncated at ' . l:spec.limit . ' of ' . l:spec.size . ' bytes (set g:omnibuf_max_hex_bytes to adjust)')
+  endif
   return {'ok': 1, 'lines': l:lines}
 endfunction
 
@@ -169,19 +178,27 @@ function! s:render_mode(filepath, mode, force_readonly) abort
 endfunction
 
 function! s:refresh_companion_splits(filepath) abort
-  let l:cur_win = winnr()
+  let l:cur_winid = win_getid()
+  let l:winids = []
   for l:w in range(1, winnr('$'))
-    if l:w == l:cur_win
-      continue
-    endif
-    let l:bn = winbufnr(l:w)
-    if getbufvar(l:bn, 'omnibuf_file', '') ==# a:filepath
-          \ && getbufvar(l:bn, 'omnibuf_mode', '') ==# 'hex'
-      execute l:w . 'wincmd w'
-      call s:render_mode(a:filepath, 'hex', 1)
-    endif
+    call add(l:winids, win_getid(l:w))
   endfor
-  execute l:cur_win . 'wincmd w'
+  try
+    for l:wid in l:winids
+      if l:wid == l:cur_winid
+        continue
+      endif
+      let l:bn = winbufnr(l:wid)
+      if getbufvar(l:bn, 'omnibuf_file', '') ==# a:filepath
+            \ && getbufvar(l:bn, 'omnibuf_mode', '') ==# 'hex'
+        if win_gotoid(l:wid)
+          call s:render_mode(a:filepath, 'hex', 1)
+        endif
+      endif
+    endfor
+  finally
+    call win_gotoid(l:cur_winid)
+  endtry
 endfunction
 
 function! omnibuf#read(filepath) abort
@@ -222,29 +239,10 @@ function! omnibuf#write_range(filepath, line1, line2) abort
     return
   endif
 
-  let l:target = empty(a:filepath) ? s:resolve_file() : a:filepath
+  let l:current = s:resolve_file()
+  let l:target = empty(a:filepath) ? l:current : a:filepath
   if empty(l:target)
     echohl ErrorMsg | echom 'omnibuf: no output file path specified' | echohl None
-    return
-  endif
-
-  let l:tmpfile = tempname()
-  let l:spec = s:build_encode_cmd(l:tmpfile)
-  if !l:spec.ok
-    echohl ErrorMsg | echom 'omnibuf: ' . l:spec.error | echohl None
-    return
-  endif
-
-  let l:json_text = join(getline(a:line1, a:line2), "\n") . "\n"
-  let l:output = system(l:spec.cmd, l:json_text)
-  if v:shell_error != 0
-    if filereadable(l:tmpfile)
-      call delete(l:tmpfile)
-    endif
-    let l:msg = substitute(l:output, '\n\+$', '', '')
-    echohl ErrorMsg
-    echom 'omnibuf: encode failed: ' . l:msg
-    echohl None
     return
   endif
 
@@ -253,13 +251,40 @@ function! omnibuf#write_range(filepath, line1, line2) abort
     call mkdir(l:dir, 'p')
   endif
 
-  if rename(l:tmpfile, l:target) != 0
-    call writefile(readfile(l:tmpfile, 'b'), l:target, 'b')
-    call delete(l:tmpfile)
+  let l:stamp = substitute(reltimestr(reltime()), '[^0-9]', '', 'g')
+  let l:tmpfile = l:dir . '/.' . fnamemodify(l:target, ':t') . '.omnibuf.' . getpid() . '.' . l:stamp
+  let l:spec = s:build_encode_cmd(l:tmpfile)
+  if !l:spec.ok
+    echohl ErrorMsg | echom 'omnibuf: ' . l:spec.error | echohl None
+    return
   endif
 
-  let b:omnibuf_file = l:target
-  setlocal nomodified
+  try
+    let l:json_text = join(getline(a:line1, a:line2), "\n") . "\n"
+    let l:output = system(l:spec.cmd, l:json_text)
+    if v:shell_error != 0
+      let l:msg = substitute(l:output, '\n\+$', '', '')
+      echohl ErrorMsg
+      echom 'omnibuf: encode failed: ' . l:msg
+      echohl None
+      return
+    endif
+
+    if rename(l:tmpfile, l:target) != 0
+      call writefile(readfile(l:tmpfile, 'b'), l:target, 'b')
+    endif
+  finally
+    if filereadable(l:tmpfile)
+      call delete(l:tmpfile)
+    endif
+  endtry
+
+  let l:is_full_buffer = (a:line1 == 1 && a:line2 == line('$'))
+  let l:is_same_file = empty(l:current) || fnamemodify(l:target, ':p') ==# fnamemodify(l:current, ':p')
+  if l:is_full_buffer && l:is_same_file
+    let b:omnibuf_file = l:target
+    setlocal nomodified
+  endif
   let l:size = getfsize(l:target)
   echom '"' . fnamemodify(l:target, ':t') . '" [omnibuf] ' . l:size . 'B written'
   call s:refresh_companion_splits(l:target)
@@ -282,7 +307,7 @@ function! omnibuf#show_hex() abort
   endif
   if &modified && get(b:, 'omnibuf_mode', '') ==# 'json'
     echohl WarningMsg
-    echom 'omnibuf: save (:w) or discard (:OmnibufRefresh) JSON edits before switching to hex view, or use :OmnibufSplit'
+    echom 'omnibuf: save (:w) or discard (:OmnibufRefresh!) JSON edits before switching to hex view, or use :OmnibufSplit'
     echohl None
     return
   endif
@@ -298,10 +323,17 @@ function! omnibuf#toggle() abort
   endif
 endfunction
 
-function! omnibuf#refresh() abort
+function! omnibuf#refresh(...) abort
+  let l:force = a:0 > 0 ? a:1 : 0
   let l:filepath = s:resolve_file()
   if empty(l:filepath)
     echohl WarningMsg | echom 'omnibuf: current buffer is not associated with an .obuf file' | echohl None
+    return
+  endif
+  if !l:force && &modified && get(b:, 'omnibuf_mode', '') ==# 'json'
+    echohl WarningMsg
+    echom 'omnibuf: unsaved JSON edits in buffer; save (:w) or run :OmnibufRefresh! to discard'
+    echohl None
     return
   endif
   let l:mode = get(b:, 'omnibuf_mode', 'json')
@@ -319,15 +351,19 @@ function! omnibuf#toggle_split() abort
   let l:other_mode = l:cur_mode ==# 'hex' ? 'json' : 'hex'
 
   " If a companion window for this file and opposite mode is already open in this tab, close it
-  let l:cur_win = winnr()
+  let l:cur_winid = win_getid()
   for l:w in range(1, winnr('$'))
-    if l:w == l:cur_win
+    let l:wid = win_getid(l:w)
+    if l:wid == l:cur_winid
       continue
     endif
-    let l:bn = winbufnr(l:w)
+    let l:bn = winbufnr(l:wid)
     if getbufvar(l:bn, 'omnibuf_file', '') ==# l:filepath
           \ && getbufvar(l:bn, 'omnibuf_mode', '') ==# l:other_mode
-      execute l:w . 'wincmd c'
+      if win_gotoid(l:wid)
+        close
+      endif
+      call win_gotoid(l:cur_winid)
       return
     endif
   endfor
@@ -343,19 +379,30 @@ function! omnibuf#toggle_split() abort
   let l:label = fnamemodify(l:filepath, ':t') . ' [' . l:other_mode . ']'
   silent! execute 'file ' . fnameescape(l:label)
   call s:render_mode(l:filepath, l:other_mode, 1)
-  execute l:cur_win . 'wincmd w'
+  call win_gotoid(l:cur_winid)
 endfunction
 
 function! omnibuf#set_schema(...) abort
-  if a:0 == 0
+  let l:args = copy(a:000)
+  let l:force = 0
+  if !empty(l:args) && type(l:args[0]) == type(0)
+    let l:force = remove(l:args, 0)
+  endif
+  if !l:force && &modified && get(b:, 'omnibuf_mode', '') ==# 'json'
+    echohl WarningMsg
+    echom 'omnibuf: unsaved JSON edits in buffer; save (:w) or run :OmnibufSchema! to discard'
+    echohl None
+    return
+  endif
+  if empty(l:args)
     let b:omnibuf_schema = ''
     let b:omnibuf_type = ''
-  elseif a:0 == 1
-    let b:omnibuf_schema = expand(a:1)
+  elseif len(l:args) == 1
+    let b:omnibuf_schema = expand(l:args[0])
     let b:omnibuf_type = ''
   else
-    let b:omnibuf_schema = expand(a:1)
-    let b:omnibuf_type = a:2
+    let b:omnibuf_schema = expand(l:args[0])
+    let b:omnibuf_type = l:args[1]
   endif
-  call omnibuf#refresh()
+  call omnibuf#refresh(1)
 endfunction
